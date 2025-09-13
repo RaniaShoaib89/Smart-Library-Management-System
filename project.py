@@ -2,6 +2,8 @@ from datetime import date, timedelta
 from tabulate import tabulate
 import pickle
 import validators
+import difflib
+from collections import Counter
 
 def validate_member(email, password):
     email_address = validators.email(email)
@@ -61,14 +63,16 @@ class User:
         print("Password changed successfully.")
 
 class Book:
-    def __init__(self, title, author, isbn, borrowed=False):
+    def __init__(self, title, author, isbn, genre, description=None, borrowed=False):
         self.title = title
         self.author = author
         self.isbn = isbn
+        self.genre = genre
+        self.description = description
         self.borrowed = borrowed
 
     def __str__(self):
-        return f"Book(title={self.title}, author={self.author}, isbn={self.isbn})"
+        return f"Book(title={self.title}, author={self.author}, isbn={self.isbn}, genre={self.genre}, description={self.description})"
 
 
 class Member(User):
@@ -130,18 +134,35 @@ class Library:
         table = [[b.title, b.author, b.isbn, "Yes" if b.borrowed else "No"] for b in self.books]
         print(tabulate(table, headers=["Title", "Author", "ISBN", "Borrowed"]))
 
-    def search_member(self, email, password=None):
-        for user in self.members:
-            if user.email == email and (password is None or user.password == password):
-                return user
-        return None
-
-    def search_book(self, title_or_isbn):
-        q = str(title_or_isbn).strip().lower()
+    def search_book(self, query):
+        q = str(query).strip().lower()
+        results = []
         for book in self.books:
-            if book.title.lower() == q or book.isbn == title_or_isbn:
-                return book
-        return None
+            if (q in book.title.lower() or q in book.author.lower()
+                or q in book.isbn.lower() or q in book.genre.lower()):
+                results.append(book)
+
+            if not results:
+                titles = [book.title for book in self.books]
+                close_matches = difflib.get_close_matches(q, titles, n=5, cutoff=0.5)
+                for match in close_matches:
+                    results.extend([b for b in self.books if b.title == match])
+
+        return results if results else None
+
+    def search_member(self, query):
+        q = query.strip.lower()
+        results = [m for m in self.members if q in m.name.lower() or q in m.email.lower()]
+
+        if not results:
+            names = [m.name for m in self.members]
+            close_matches = difflib.get_close_matches(q, names, n=5, cutoff=0.5)
+            for match in close_matches:
+                results.extend([m for m in self.members if m.name == match])
+
+        return results if results else None
+    
+    
 
  
     def _add_member(self, user):
@@ -242,6 +263,29 @@ class Library:
         else:
             print(f"The book '{title_or_isbn}' is not available at the moment.")
 
+    def recommend_books(self, member=None,mode="generic", query_title=None, n=3):
+        if not self.books:
+            return []
+        
+        if mode == "generic":
+            if not query_title:
+                return []
+            titles = [book.title for book in self.books]
+            close_matches = difflib.get_close_matches(query_title, titles, n=n, cutoff=0.3)
+            return close_matches
+        elif mode == "personalized" and member:
+            if not member.borrowed_books:
+                return []
+            genres = [book.genre for book in member.borrowed_books if book.genre]
+            fav_genre = Counter(genres).most_common(1)[0][0]
+
+            recs = [book.title for book in self.books if book.genre == fav_genre and book not in self.borrowed_books]
+            return recs[:3]
+        return []
+    
+    
+
+    
 
 class Librarian(User):
     def __init__(self, name, age, email, password, library):
@@ -346,17 +390,25 @@ def library_menu(library, librarian):
             case "7":
                 library.print_users()
             case "8":
-                title = input("Enter book title or ISBN to search: ")
-                if book := library.search_book(title):
-                    print(f"Found book: {book}")
+                query = input("Enter query to search book: ")
+                results = library.search_book(query)
+                if results:
+                    print("Search results:")
+                    for book in results:
+                        print(f" - {book.title} (ISBN: {book.isbn})")
                 else:
-                    print("Book not found.")
+                    print("No results found.")
+
             case "9":
-                email = input("Enter member email to search: ")
-                if member := library.search_member(email):
-                    print(f"Found member: {member}")
+                query = input("Enter query to search member: ")
+                results = library.search_member(query)
+                if results:
+                    print("Search results:")
+                    for member in results:
+                        print(f" - {member.name} (Email: {member.email})")
                 else:
-                    print("Member not found.")
+                    print("No results found.")
+
             case "10":
                 email = input("Enter member email: ")
                 title = input("Enter book title or ISBN: ")
