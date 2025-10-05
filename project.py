@@ -5,7 +5,10 @@ import validators
 import difflib
 from collections import Counter
 
-def validate_member(email, password):
+
+BORROW_LIMIT = 3
+
+def validate_credentials(email, password):
     email_address = validators.email(email)
     if not email_address:
         print("Invalid email format.")
@@ -30,6 +33,8 @@ def forgot_password(library):
     email = input("Enter your email: ")
     if user := library.search_member(email):
         new_password = input("Enter new password: ")
+        if not validate_credentials(email, new_password):
+            return 
         user.change_password(new_password, library)
     else:
         print("Member not found.")
@@ -57,28 +62,65 @@ class User:
     def __str__(self):
         return f"User(name={self.name}, age={self.age}, email={self.email})"
     def change_password(self, new_password, library):
-        if not validate_member(self.email, new_password):
+        if not validate_credentials(self.email, new_password):
             return
         self.password = new_password
         print("Password changed successfully.")
 
 class Book:
-    def __init__(self, title, author, isbn, genre, description=None, borrowed=False):
+    def __init__(self, title, author, isbn, genre, description=None, borrowed=False, total_copies=1):
         self.title = title
         self.author = author
         self.isbn = isbn
         self.genre = genre
         self.description = description
-        self.borrowed = borrowed
+        self.total_copies = total_copies
+        self.available_copies = total_copies
+        self.reservation_queue = []
+        
 
     def __str__(self):
         return f"Book(title={self.title}, author={self.author}, isbn={self.isbn}, genre={self.genre}, description={self.description})"
+    
+    def is_available(self):
+        return self.available_copies > 0
+
+    def borrow_copy(self):
+        if self.is_available():
+            self.available_copies -= 1
+            return True
+        return False
+
+    def return_copy(self):
+        if self.available_copies < self.total_copies:
+            self.available_copies += 1
+        
+    
+    def reserve_book(self, member):
+        if member in self.reservation_queue:
+            print(f"You’ve already reserved '{self.title}'.")
+            return False
+        if self.available_copies > 0:
+            print(f"{self.title} is available. You can borrow it directly.")
+            return False
+        self.reservation_queue.append(member)
+        member.notify(f"You reserved '{self.title}'. You’ll be notified when it’s available.")
+        print(f"{member.name} has reserved '{self.title}'.")
+        return True
+        
+    def notify_next_reserver(self):
+        if self.reservation_queue:
+            next_member = self.reservation_queue.pop(0)
+            next_member.notify(f"'{self.title}' is now available for you to borrow.")
+            print(f"Notification sent to {next_member.name} for '{self.title}'.")
 
 
 class Member(User):
     def __init__(self, name, age, email, password):
         self.borrowed_books = []
         self.transactions = []
+        self.notifications = []
+        self.reserved_books = []
         super().__init__(name, age, email, password)
 
  
@@ -116,6 +158,33 @@ class Member(User):
       
             fine = transaction.calculate_fine(date.today())
             print(f"Book: {transaction.book.title}, Due Date: {transaction.due_date}, Fine: ${fine:.2f}")
+    def clear_dues(self):
+        for transaction in self.transactions:
+            fine = transaction.calculate_fine(date.today())
+            if fine > 0:
+                transaction.return_date = date.today()
+                print(f"Fine of Rs.{fine} paid successfully for '{transaction.book.title}'.")
+            else:
+                print(f"No fine for '{transaction.book.title}'")
+    
+    def view_reservations(self):
+        print(f"Reservations for {self.name}:")
+        for book in self.reserved_books:
+            print(f" - {book.title}")
+    
+    def notify(self, message):
+        self.notifications.append(message)
+    
+    def view_notifications(self):
+        if not self.notifications:
+            print("No new notifications.")
+        else:
+            print(f"Notifications for {self.name}:")
+            for note in self.notifications:
+                print(" -", note)
+        self.notifications.clear()
+
+
 
 
 
@@ -131,8 +200,9 @@ class Library:
         print(tabulate(table, headers=["Name", "Age", "Email"]))
 
     def print_books(self):
-        table = [[b.title, b.author, b.isbn, "Yes" if b.borrowed else "No"] for b in self.books]
-        print(tabulate(table, headers=["Title", "Author", "ISBN", "Borrowed"]))
+        table = [[b.title, b.author, b.isbn, f"{b.available_copies}/{b.total_copies}"] for b in self.books]
+        print(tabulate(table, headers=["Title", "Author", "ISBN", "Available/Total"]))
+
 
     def search_book(self, query):
         q = str(query).strip().lower()
@@ -142,16 +212,16 @@ class Library:
                 or q in book.isbn.lower() or q in book.genre.lower()):
                 results.append(book)
 
-            if not results:
-                titles = [book.title for book in self.books]
-                close_matches = difflib.get_close_matches(q, titles, n=5, cutoff=0.5)
-                for match in close_matches:
-                    results.extend([b for b in self.books if b.title == match])
+        if not results:
+            titles = [book.title for book in self.books]
+            close_matches = difflib.get_close_matches(q, titles, n=5, cutoff=0.5)
+            for match in close_matches:
+                results.extend([b for b in self.books if b.title == match])
 
         return results if results else None
 
     def search_member(self, query):
-        q = query.strip.lower()
+        q = query.strip().lower()
         results = [m for m in self.members if q in m.name.lower() or q in m.email.lower()]
 
         if not results:
@@ -160,7 +230,8 @@ class Library:
             for match in close_matches:
                 results.extend([m for m in self.members if m.name == match])
 
-        return results if results else None
+        return results[0] if results else None
+
     
     
 
@@ -221,47 +292,65 @@ class Library:
 
     
     def borrow_book(self, member, title_or_isbn):
-        if book := self.search_book(title_or_isbn):
-            if book.borrowed:
-                print(f"The book '{book.title}' is currently borrowed.")
+        if len(member.borrowed_books) >= BORROW_LIMIT:
+            print(f"Borrowing limit reached. You can borrow up to {BORROW_LIMIT} books.")
+            return
+        books = self.search_book(title_or_isbn)
+        if not books:
+            print(f"No book found with title or ISBN '{title_or_isbn}'.")
+            return
+        book = books[0]  # take first match
+        if not book.is_available():
+            print(f"'{book.title}' is currently not available. ({book.available_copies}/{book.total_copies} copies left)")
+            reserve_choice = input("Would you like to reserve it? (y/n): ").lower()
+            if reserve_choice == "y":
+                book.reserve_book(member)
+                member.reserved_books.append(book)
+            return
+
+    # Check if member has outstanding fines
+        for t in member.transactions:
+            if t.return_date is None and t.calculate_fine(date.today()) > 0:
+                fine = t.calculate_fine(date.today())
+                print(f"Cannot borrow. Outstanding fine: Rs.{fine} for '{t.book.title}'.")
                 return
-           
-            for t in member.transactions:
-                if t.return_date is None and t.calculate_fine(date.today()) > 0:
-                    print(f"Cannot borrow: outstanding fine ${t.calculate_fine(date.today()):.2f} for {t.book.title}")
-                    return
-            book.borrowed = True
+
+    # Proceed to borrow
+        if book.borrow_copy():
             transaction = Transaction(member, book, date.today())
             self._add_transaction(transaction)
             member.add_borrowed_book(book)
             member.add_transaction(transaction)
-            print(f"{member.name} has successfully borrowed '{book.title}'.")
+            print(f"{member.name} borrowed '{book.title}'. Due on {transaction.due_date}.")
         else:
-            print(f"The book '{title_or_isbn}' is not available at the moment.")
+            print(f"No available copies for '{book.title}'.")
+
 
     def return_book(self, member, title_or_isbn):
-        if book := self.search_book(title_or_isbn):
-            if not book.borrowed:
-                print(f"The book '{book.title}' was not borrowed.")
-                return
-           
-            transaction = next((t for t in self.transactions if t.member == member and t.book == book and t.return_date is None), None)
-            if not transaction:
-                print("No open borrowing record found for this member/book.")
-                return
-       
-            today = date.today()
-            transaction.return_date = today
-            if today > transaction.due_date:
-                fine = transaction.calculate_fine(today)
-                print(f"A fine of ${fine:.2f} is due.")
-            else:
-                print("Book returned on time. No fine.")
-            book.borrowed = False
-            member.remove_borrowed_book(book)
-          
+        books = self.search_book(title_or_isbn)
+        if not books:
+            print(f"No book found with title or ISBN '{title_or_isbn}'.")
+            return
+
+        book = books[0]
+        transaction = next((t for t in self.transactions if t.member == member and t.book == book and t.return_date is None), None)
+
+        if not transaction:
+            print("No matching transaction found for this member and book.")
+            return
+
+        today = date.today()
+        transaction.return_date = today
+        fine = transaction.calculate_fine(today)
+
+        if fine > 0:
+            print(f"Returned late! Fine = Rs.{fine}")
         else:
-            print(f"The book '{title_or_isbn}' is not available at the moment.")
+            print("Book returned on time. No fine.")
+
+        book.return_copy()
+        member.remove_borrowed_book(book)
+        book.notify_next_reserver()
 
     def recommend_books(self, member=None,mode="generic", query_title=None, n=3):
         if not self.books:
@@ -279,7 +368,7 @@ class Library:
             genres = [book.genre for book in member.borrowed_books if book.genre]
             fav_genre = Counter(genres).most_common(1)[0][0]
 
-            recs = [book.title for book in self.books if book.genre == fav_genre and book not in self.borrowed_books]
+            recs = [book.title for book in self.books if book.genre == fav_genre and book not in member.borrowed_books]
             return recs[:3]
         return []
     
@@ -297,7 +386,7 @@ class Librarian(User):
 
     def register_member(self, name, age, email, password):
        
-        if not validate_member(email, password):
+        if not validate_credentials(email, password):
             print("Member not registered: invalid email/password format.")
             return None
         member = Member(name, age, email, password)
@@ -367,7 +456,10 @@ def library_menu(library, librarian):
                 title = input("Enter book title: ")
                 author = input("Enter book author: ")
                 isbn = input("Enter book ISBN: ")
-                book = Book(title, author, isbn)
+                genre = input("Enter book genre: ")
+                description = input("Enter book description (optional): ")
+                total_copies = int(input("Enter total copies of the book: "))
+                book = Book(title, author, isbn, genre, description, total_copies=total_copies)
                 librarian.add_book(book)
             case "3":
                 email = input("Enter member email to remove: ")
@@ -439,7 +531,11 @@ def member_menu(library, member):
         print("2.Search Books")
         print("3.View pending dues")
         print("4.Change password")
-        print("5.Logout")
+        print("5.Reserve Book")
+        print("6.View Recommendations")
+        print("7.View Notifications")
+        print("8.Clear Dues")
+        print("9.Logout")
 
         match input("Enter your choice: "):
             case "1":
@@ -452,8 +548,30 @@ def member_menu(library, member):
             case "4":
                 forgot_password(library)
             case "5":
+                title = input("Enter book title or ISBN to reserve: ")
+                books = library.search_book(title)
+                if not books:
+                    print(f"No book found with title or ISBN '{title}'.")
+                    continue
+                book = books[0]
+                if book.reserve_book(member):
+                    member.reserved_books.append(book)
+            case "6":
+                recs = library.recommend_books(member, mode="personalized")
+                if recs:
+                    print("Recommended books for you:")
+                    for r in recs:
+                        print(" -", r)
+                else:
+                    print("No personalized recommendations yet.")
+            case "7":
+                member.view_notifications()
+            case "8":
+                member.clear_dues()
+            case "9":
                 print("Logging out...")
                 return
+            
             case _:
                 print("Invalid choice.")
                 continue
@@ -474,6 +592,9 @@ def main():
             if not user:
                 continue
             print(f"Welcome, {user.name}!")
+            if user.notifications:
+                print(f"📩 You have {len(user.notifications)} new notification(s). Use 'View Notifications' to check them.")
+
             if user == library.librarian:
                 library_menu(library, user)
             else:
